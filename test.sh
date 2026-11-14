@@ -5,7 +5,7 @@ TEST_BUILD_DIR="$PROJECT_DIR/build/tests"
 mkdir -p "$TEST_BUILD_DIR"
 export CHENGYIN_EVENT_ROOT="$(mktemp -d "$TEST_BUILD_DIR/chengyin-events.XXXXXX")"
 trap 'rm -rf "$CHENGYIN_EVENT_ROOT"' EXIT
-for TEST_NAME in UsageModelsTests UsageClientTests ResetCountdownTests TiboResetMonitorTests TiboAlertTests ResetAnnouncementTimeTests TiboPostLinkTests DeepSeekSpendTests ClaudeWindowTests ClaudeProviderTests; do
+for TEST_NAME in UsageModelsTests UsageClientTests ResetCountdownTests TiboResetMonitorTests TiboAlertTests ResetAnnouncementTimeTests TiboPostLinkTests DeepSeekSpendTests GrokUsageTests ClaudeWindowTests BAIUsageTests; do
   SOURCE_FILES=("$PROJECT_DIR/Source/UsageModels.swift")
   if [[ "$TEST_NAME" == "UsageClientTests" ]]; then
     SOURCE_FILES+=("$PROJECT_DIR/Source/UsageClient.swift")
@@ -28,11 +28,14 @@ for TEST_NAME in UsageModelsTests UsageClientTests ResetCountdownTests TiboReset
   if [[ "$TEST_NAME" == "DeepSeekSpendTests" ]]; then
     SOURCE_FILES=("$PROJECT_DIR/Source/DeepSeekUsage.swift")
   fi
+  if [[ "$TEST_NAME" == "GrokUsageTests" ]]; then
+    SOURCE_FILES+=("$PROJECT_DIR/Source/GrokUsage.swift")
+  fi
   if [[ "$TEST_NAME" == "ClaudeWindowTests" ]]; then
     SOURCE_FILES+=("$PROJECT_DIR/Source/ClaudeUsage.swift")
   fi
-  if [[ "$TEST_NAME" == "ClaudeProviderTests" ]]; then
-    SOURCE_FILES+=("$PROJECT_DIR/Source/ClaudeUsage.swift" "$PROJECT_DIR/Source/ClaudeProvider.swift")
+  if [[ "$TEST_NAME" == "BAIUsageTests" ]]; then
+    SOURCE_FILES+=("$PROJECT_DIR/Source/ClaudeUsage.swift" "$PROJECT_DIR/Source/BAIUsage.swift")
   fi
   xcrun swiftc -module-cache-path "$TEST_BUILD_DIR/module-cache" \
     "${SOURCE_FILES[@]}" "$PROJECT_DIR/Tests/$TEST_NAME.swift" -o "$TEST_BUILD_DIR/$TEST_NAME"

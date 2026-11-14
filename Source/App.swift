@@ -42,13 +42,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastError: String?
     private var claudeSnapshot: ClaudeSnapshot?
     private var baiBalance: BAIBalance?
-    private var providerGate = ProviderRequestGate()
-    private var claudeProvider: ClaudeProvider { ClaudeProvider.selected(in: preferences) }
-    private var providerStale: Bool { claudeProvider == .official ? claudeDataStale : (baiBalance?.isStale() ?? true) }
-    private var providerText: String {
-        if providerStale { return "--" }
-        return claudeProvider == .official ? (claudePercent.map { "\($0)%" } ?? "--") : (baiBalance?.compactText ?? "--")
-    }
     private var claudeLastError: String?
     private var claudeRefreshInProgress = false
     private var claudeTimer: Timer?
@@ -57,6 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let claudeFreshnessInterval: TimeInterval = 900
     private var claudeFailureCount = 0
     private var claudeRetryAfter: Date?
+    private var baiLastError: String?
+    private var baiRefreshInProgress = false
+    private var baiTimer: Timer?
+    private let baiQueue = DispatchQueue(label: "local.codex-battery.bai", qos: .utility)
+    private let baiRefreshInterval: TimeInterval = 300
+    private let baiFreshnessInterval: TimeInterval = 900
+    private var baiFailureCount = 0
+    private var baiRetryAfter: Date?
     private var deepSeekBalance: DeepSeekBalance?
     private var deepSeekSpend = DeepSeekSpendTracker.State.empty()
     private var deepSeekLastError: String?
@@ -67,6 +68,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let deepSeekFreshnessInterval: TimeInterval = 1_800
     private var deepSeekFailureCount = 0
     private var deepSeekRetryAfter: Date?
+    private var grokSnapshot: GrokSnapshot?
+    private var grokLastError: String?
+    private var grokRefreshInProgress = false
+    private var grokTimer: Timer?
+    private let grokQueue = DispatchQueue(label: "local.agent-battery.grok", qos: .utility)
+    private let grokRefreshInterval: TimeInterval = 300
+    private let grokFreshnessInterval: TimeInterval = 900
+    private var grokFailureCount = 0
+    private var grokRetryAfter: Date?
     private var announcementTimer: Timer?
     private var announcements: TiboResetSnapshot?
     private var announcementError = false
@@ -99,6 +109,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private var claudeDisplayWindow: UsageWindow? { claudeSnapshot?.window(for: selection) }
     private var claudePercent: Int? { claudeDisplayWindow?.displayPercent }
+    private var claudeText: String {
+        guard !claudeDataStale else { return "--" }
+        return claudePercent.map { "\($0)%" } ?? "--"
+    }
+    private var showBAIUsage: Bool {
+        preferences.object(forKey: "showBAIUsage") == nil || preferences.bool(forKey: "showBAIUsage")
+    }
+    /// B.AI 是独立第三方余额，与 Claude 官方订阅各自缓存、各自退避，互不覆盖。
+    private var baiDataStale: Bool {
+        baiBalance == nil || Date().timeIntervalSince(baiBalance!.fetchedAt) > baiFreshnessInterval
+    }
+    private var baiText: String { baiDataStale ? "--" : baiBalance?.compactText ?? "--" }
     private var showDeepSeekUsage: Bool {
         preferences.object(forKey: "showDeepSeekUsage") == nil || preferences.bool(forKey: "showDeepSeekUsage")
     }
@@ -106,6 +128,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         deepSeekBalance == nil || Date().timeIntervalSince(deepSeekBalance!.fetchedAt) > deepSeekFreshnessInterval
     }
     private var deepSeekText: String { deepSeekDataStale ? "--" : deepSeekBalance?.compactText ?? "--" }
+    private var showGrokUsage: Bool {
+        preferences.object(forKey: "showGrokUsage") == nil || preferences.bool(forKey: "showGrokUsage")
+    }
+    /// Grok 用的是账号自己的周期（当前为每周），与 Codex/Claude 的 5 小时/每周开关无关。
+    private var grokDataStale: Bool {
+        grokSnapshot == nil || Date().timeIntervalSince(grokSnapshot!.fetchedAt) > grokFreshnessInterval
+    }
+    private var grokWindow: UsageWindow? { grokSnapshot?.window }
+    private var grokPercent: Int? { grokWindow?.displayPercent }
+    private var grokText: String {
+        guard !grokDataStale else { return "--" }
+        return grokPercent.map { "\($0)%" } ?? "--"
+    }
     private var announcementDataStale: Bool {
         announcementError || announcements == nil || Date().timeIntervalSince(announcements!.fetchedAt) > 900
             || (announcements?.sourceGeneratedAt.map { Date().timeIntervalSince($0) > 900 } ?? false)
@@ -168,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         baiBalance = BAICache.load()
         deepSeekBalance = DeepSeekCache.load()
         deepSeekSpend = DeepSeekSpendTracker.load()
+        grokSnapshot = GrokUsageCache.load()
         migrateLegacyReadState()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.isVisible = true
@@ -193,19 +229,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         RunLoop.main.add(announcementTimer!, forMode: .common)
         claudeTimer = Timer.scheduledTimer(withTimeInterval: claudeRefreshInterval, repeats: true) { [weak self] _ in self?.refreshClaude() }
         RunLoop.main.add(claudeTimer!, forMode: .common)
+        baiTimer = Timer.scheduledTimer(withTimeInterval: baiRefreshInterval, repeats: true) { [weak self] _ in self?.refreshBAI() }
+        RunLoop.main.add(baiTimer!, forMode: .common)
         deepSeekTimer = Timer.scheduledTimer(withTimeInterval: deepSeekRefreshInterval, repeats: true) { [weak self] _ in self?.refreshDeepSeek() }
         RunLoop.main.add(deepSeekTimer!, forMode: .common)
+        grokTimer = Timer.scheduledTimer(withTimeInterval: grokRefreshInterval, repeats: true) { [weak self] _ in self?.refreshGrok() }
+        RunLoop.main.add(grokTimer!, forMode: .common)
         rebuildMenu()
         updateDisplay()
         refresh()
         refreshClaude()
+        refreshBAI()
         refreshDeepSeek()
+        refreshGrok()
         refreshAnnouncements()
     }
 
     @objc private func appearanceChanged() { updateDisplay() }
     @objc private func wokeUp() {
-        updateDisplay(); refresh(); refreshClaude(); refreshDeepSeek(); refreshAnnouncements()
+        updateDisplay(); refresh(); refreshClaude(); refreshBAI(); refreshDeepSeek(); refreshGrok(); refreshAnnouncements()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -278,39 +320,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func refreshClaudeNow() { refreshClaude(force: true) }
 
-    /// 这个接口限流较紧，失败后按倍数退避，避免把限流窗口一直续着。
+    /// Claude 官方订阅：只读 Claude Code OAuth 额度，与 B.AI 余额各自独立。
     private func refreshClaude(force: Bool) {
         guard !headlessTestMode, demoScenario == nil, !demoRequested else { return }
         guard !claudeRefreshInProgress else { return }
         if !force, let retry = claudeRetryAfter, retry > Date() { return }
         claudeRefreshInProgress = true
-        let provider = claudeProvider
-        let ticket = providerGate.generation
         claudeQueue.async { [weak self] in
-            let result = Result { () throws -> (ClaudeSnapshot?, BAIBalance?) in
-                if provider == .official { return (try ClaudeUsageClient().fetch(), nil) }
-                return (nil, try BAIClient().fetch())
-            }
+            let result = Result { try ClaudeUsageClient().fetch() }
             DispatchQueue.main.async {
-                guard let self, self.providerGate.accepts(ticket), self.claudeProvider == provider else { return }
+                guard let self else { return }
                 self.claudeRefreshInProgress = false
                 switch result {
-                case .success(let data):
-                    if let official = data.0 { self.claudeSnapshot = official; ClaudeUsageCache.save(official) }
-                    if let bai = data.1 { self.baiBalance = bai; BAICache.save(bai) }
+                case .success(let official):
+                    self.claudeSnapshot = official
+                    ClaudeUsageCache.save(official)
                     self.claudeLastError = nil
                     self.claudeFailureCount = 0
                     self.claudeRetryAfter = nil
                 case .failure(let error):
                     self.claudeLastError = error.localizedDescription
                     self.claudeFailureCount += 1
-                    if case .rateLimited(let after)? = error as? BAIError {
-                        self.claudeRetryAfter = Date().addingTimeInterval(min(max(after ?? 300, 30), 1_800))
-                    } else if case .rateLimited(let after)? = error as? ClaudeUsageError {
+                    if case .rateLimited(let after)? = error as? ClaudeUsageError {
                         self.claudeRetryAfter = Date().addingTimeInterval(min(max(after ?? 300, 30), 1_800))
                     } else {
                         let delay = 300 * pow(2, Double(min(self.claudeFailureCount, 4) - 1))
                         self.claudeRetryAfter = Date().addingTimeInterval(min(delay, 1_800))
+                    }
+                }
+                self.updateDisplay()
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    @objc private func refreshBAI() { refreshBAI(force: false) }
+
+    @objc private func refreshBAINow() { refreshBAI(force: true) }
+
+    /// B.AI 第三方余额：独立缓存与退避，限流不会抹掉 Claude 的读数，反之亦然。
+    private func refreshBAI(force: Bool) {
+        guard !headlessTestMode, demoScenario == nil, !demoRequested else { return }
+        guard !baiRefreshInProgress else { return }
+        if !force, let retry = baiRetryAfter, retry > Date() { return }
+        baiRefreshInProgress = true
+        baiQueue.async { [weak self] in
+            let result = Result { try BAIClient().fetch() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.baiRefreshInProgress = false
+                switch result {
+                case .success(let balance):
+                    self.baiBalance = balance
+                    BAICache.save(balance)
+                    self.baiLastError = nil
+                    self.baiFailureCount = 0
+                    self.baiRetryAfter = nil
+                case .failure(let error):
+                    self.baiLastError = error.localizedDescription
+                    self.baiFailureCount += 1
+                    if case .rateLimited(let after)? = error as? BAIError {
+                        self.baiRetryAfter = Date().addingTimeInterval(min(max(after ?? 300, 30), 1_800))
+                    } else if case .missingKey? = error as? BAIError {
+                        self.baiRetryAfter = Date().addingTimeInterval(1_800)
+                    } else {
+                        let delay = 300 * pow(2, Double(min(self.baiFailureCount, 4) - 1))
+                        self.baiRetryAfter = Date().addingTimeInterval(min(delay, 1_800))
                     }
                 }
                 self.updateDisplay()
@@ -367,6 +442,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func refreshGrok() { refreshGrok(force: false) }
+
+    @objc private func refreshGrokNow() { refreshGrok(force: true) }
+
+    /// Grok 额度走订阅计费接口：只读百分比，不发起推理、不消耗额度。
+    private func refreshGrok(force: Bool) {
+        guard !headlessTestMode, demoScenario == nil, !demoRequested else { return }
+        guard !grokRefreshInProgress else { return }
+        if !force, let retry = grokRetryAfter, retry > Date() { return }
+        grokRefreshInProgress = true
+        grokQueue.async { [weak self] in
+            let result = Result { try GrokUsageClient().fetch() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.grokRefreshInProgress = false
+                switch result {
+                case .success(let snapshot):
+                    self.grokSnapshot = snapshot
+                    self.grokLastError = nil
+                    self.grokFailureCount = 0
+                    self.grokRetryAfter = nil
+                    GrokUsageCache.save(snapshot)
+                case .failure(let error):
+                    self.grokLastError = error.localizedDescription
+                    self.grokFailureCount += 1
+                    if case .rateLimited(let after)? = error as? GrokUsageError {
+                        self.grokRetryAfter = Date().addingTimeInterval(min(max(after ?? 300, 30), 1_800))
+                    } else if case .loginExpired? = error as? GrokUsageError {
+                        // 凭证 6 小时有效且只能由 Grok CLI 刷新：不要反复重试同一个必然失败的请求。
+                        self.grokRetryAfter = Date().addingTimeInterval(1_800)
+                    } else if case .credentialsNotFound? = error as? GrokUsageError {
+                        self.grokRetryAfter = Date().addingTimeInterval(1_800)
+                    } else {
+                        let delay = 300 * pow(2, Double(min(self.grokFailureCount, 4) - 1))
+                        self.grokRetryAfter = Date().addingTimeInterval(min(delay, 1_800))
+                    }
+                }
+                self.updateDisplay()
+                self.rebuildMenu()
+            }
+        }
+    }
+
     private func updateDisplay() {
         guard !headlessTestMode else { return }
         let percent = snapshot?.chosenWindow(selection: selection)?.displayPercent
@@ -376,7 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.image = nil
         let reminderLevel = ResetCountdown.reminderLevel(until: snapshot?.chosenWindow(selection: selection)?.resetDate, stale: usageDataStale)
 
-        // 一个服务一条：Codex / Claude 显示剩余百分比，DeepSeek 显示余额。
+        // 一个来源一条：Codex / Claude 显示剩余百分比，B.AI、DeepSeek 显示余额，Grok 显示订阅剩余。
         var segments: [ProviderBadge.Segment] = []
         func addProvider(_ label: String, _ value: Int?, _ stale: Bool, enabled: Bool = true) {
             guard enabled else { return }
@@ -384,10 +502,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         addProvider("Codex", percent, isStale)
         if showClaudeUsage {
-            segments.append(ProviderBadge.Segment(label: claudeProvider.label, value: providerText, stale: providerStale))
+            segments.append(ProviderBadge.Segment(label: "Claude", value: claudeText, stale: claudeDataStale))
+        }
+        if showBAIUsage {
+            segments.append(ProviderBadge.Segment(label: BAIEndpoint.label, value: baiText, stale: baiDataStale))
         }
         if showDeepSeekUsage {
             segments.append(ProviderBadge.Segment(label: "DeepSeek", value: deepSeekText, stale: deepSeekDataStale))
+        }
+        if showGrokUsage {
+            segments.append(ProviderBadge.Segment(label: "Grok", value: grokText, stale: grokDataStale))
         }
 
         let title = NSMutableAttributedString(attributedString: ProviderBadge.title(
@@ -409,11 +533,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let deepSeekTip = showDeepSeekUsage
             ? "\n\nDeepSeek 余额 \(deepSeekBalance?.detailText ?? "暂不可用")（今日花费 \(deepSeekSpend.day.isEmpty ? "待采样" : String(format: "¥%.2f", deepSeekSpend.spentToday))，按余额差分估算）"
             : ""
-        statusItem.button?.toolTip = "菜单栏顺序：Codex · Claude · DeepSeek 余额\n\nCodex · \(label)剩余 \(description)\n账号周期重置：\(resetDetail)\n\nClaude \(claudeWindow?.durationLabel ?? "账号")剩余 \(claudeDescription)\n周期重置：\(claudeDetail)\(alertDetail)\n消息发布不等于本人账号已重置\(deepSeekTip)"
-        if claudeProvider == .bai {
-            statusItem.button?.toolTip = "Codex · \(label)剩余 \(description)\nB.AI 可用：\(providerText)（精确 \(baiBalance?.text ?? "未知")）\n菜单栏按 M/K 缩写；不适用 5 小时/每周周期\(deepSeekTip)"
-        }
-        statusItem.button?.setAccessibilityValue("\(label)剩余 \(description)，周期重置 \(countdownText)\(announcementIndicator)，\(claudeProvider.label) \(providerText)")
+        let grokResetDetail = grokWindow?.resetDate.map { ResetCountdown.detail(until: $0, timezone: displayTimezone) } ?? "账号暂未提供重置时间"
+        let grokTip = showGrokUsage
+            ? "\n\nGrok \(grokSnapshot?.plan?.displayName ?? "订阅")·\(grokSnapshot?.periodLabel ?? "当前周期")剩余 \(grokDataStale ? "--" : grokText)\n周期重置：\(grokResetDetail)\(grokSnapshot.map { $0.productSummary.isEmpty ? "" : "\n用量明细：\($0.productSummary)" } ?? "")"
+            : ""
+        let baiTip = showBAIUsage
+            ? "\n\nB.AI 可用：\(baiText)（精确 \(baiBalance?.text ?? "未知")）\n菜单栏按 M/K 缩写；不适用订阅周期"
+            : ""
+        statusItem.button?.toolTip = "菜单栏顺序：Codex · Claude · B.AI · DeepSeek 余额 · Grok\n\nCodex · \(label)剩余 \(description)\n账号周期重置：\(resetDetail)\n\nClaude \(claudeWindow?.durationLabel ?? "账号")剩余 \(claudeDescription)\n周期重置：\(claudeDetail)\(alertDetail)\n消息发布不等于本人账号已重置\(baiTip)\(grokTip)\(deepSeekTip)"
+        statusItem.button?.setAccessibilityValue("\(label)剩余 \(description)，周期重置 \(countdownText)\(announcementIndicator)，Claude \(claudeText)，B.AI \(baiText)，Grok \(grokText)")
         writeStatus()
     }
 
@@ -496,20 +624,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             info("读数已过期，等待刷新")
         }
         targetMenu.addItem(.separator())
-        info("Claude 服务来源（当前：\(claudeProvider.title)）")
-        for provider in ClaudeProvider.allCases {
-            let item = action(provider.title, selector: #selector(selectClaudeProvider(_:)))
-            item.representedObject = provider.rawValue
-            item.state = claudeProvider == provider ? .on : .off
-        }
-        action("安全配置 B.AI API Key…", selector: #selector(configureBAIKey))
-        if claudeProvider == .bai {
-            for line in baiBalance?.details ?? ["暂未取得 B.AI 余额"] { info(line) }
-            if let balance = baiBalance {
-                info("上次更新：\(timeFormatter.string(from: balance.fetchedAt))\(providerStale ? "（读数已过期）" : "")")
-            }
-            info("单位：原始 Credits 积分；不适用订阅周期")
-        } else {
         info("Claude Code · 官方订阅剩余额度")
         if let claudeSnapshot {
             if claudeSnapshot.windows.isEmpty { info("Claude 未提供额度百分比") }
@@ -526,14 +640,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             info(claudeRefreshInProgress ? "正在读取 Claude 用量…" : "暂未取得 Claude 用量")
         }
-        }
         if let claudeLastError {
             for line in wrap(claudeLastError) { info(line) }
         }
         if let retry = claudeRetryAfter, retry > Date(), claudeLastError != nil {
             info("下次自动重试：\(timeFormatter.string(from: retry))")
         }
-        action(claudeRefreshInProgress ? "正在刷新 \(claudeProvider.label)…" : "立即刷新 \(claudeProvider.label)", selector: #selector(refreshClaudeNow)).isEnabled = !claudeRefreshInProgress
+        action(claudeRefreshInProgress ? "正在刷新 Claude…" : "立即刷新 Claude", selector: #selector(refreshClaudeNow)).isEnabled = !claudeRefreshInProgress
+        targetMenu.addItem(.separator())
+        info("B.AI · 第三方余额（积分 Credits，不适用订阅周期）")
+        if let balance = baiBalance {
+            for line in balance.details { info(line) }
+            info("上次更新：\(timeFormatter.string(from: balance.fetchedAt))\(baiDataStale ? "（读数已过期）" : "")")
+        } else {
+            info(baiRefreshInProgress ? "正在读取 B.AI 余额…" : "暂未取得 B.AI 余额")
+        }
+        if let baiLastError {
+            for line in wrap(baiLastError) { info(line) }
+        }
+        if let retry = baiRetryAfter, retry > Date(), baiLastError != nil {
+            info("下次自动重试：\(timeFormatter.string(from: retry))")
+        }
+        action("安全配置 B.AI API Key…", selector: #selector(configureBAIKey))
+        action(baiRefreshInProgress ? "正在刷新 B.AI…" : "立即刷新 B.AI 余额", selector: #selector(refreshBAINow)).isEnabled = !baiRefreshInProgress
         targetMenu.addItem(.separator())
         info("DeepSeek · 账户余额（预付费，官方无百分比额度）")
         if let balance = deepSeekBalance {
@@ -565,6 +694,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         action("校准今日已花费…", selector: #selector(calibrateDeepSeekSpend)).isEnabled = deepSeekBalance != nil
         action(deepSeekRefreshInProgress ? "正在刷新 DeepSeek…" : "立即刷新 DeepSeek 余额", selector: #selector(refreshDeepSeekNow)).isEnabled = !deepSeekRefreshInProgress
         targetMenu.addItem(.separator())
+        info("Grok · \(grokSnapshot?.plan?.displayName ?? "订阅")额度（按账号自己的周期）")
+        if let grokSnapshot {
+            let staleSuffix = grokDataStale ? "（上次读数）" : ""
+            info("\(grokSnapshot.periodLabel)剩余：\(grokPercent.map { "\($0)%" } ?? "未知")\(staleSuffix)")
+            if let reset = grokSnapshot.periodEnd {
+                info("  周期重置：\(resetFormatter.string(from: reset))")
+            }
+            if let plan = grokSnapshot.plan {
+                var line = plan.active ? "订阅有效：\(plan.displayName)" : "订阅状态待确认：\(plan.displayName)"
+                if plan.cancelAtPeriodEnd { line += "（已关闭自动续费）" }
+                if let renews = plan.renewsAt { line += " · 续费 \(resetFormatter.string(from: renews))" }
+                info(line)
+            }
+            if !grokSnapshot.productSummary.isEmpty {
+                info("用量归因（同一额度按产品拆分，不相加）：\(grokSnapshot.productSummary)")
+            }
+            info("上次更新：\(timeFormatter.string(from: grokSnapshot.fetchedAt))")
+        } else {
+            info(grokRefreshInProgress ? "正在读取 Grok 额度…" : "暂未取得 Grok 额度")
+        }
+        if let grokLastError {
+            for line in wrap(grokLastError) { info(line) }
+        }
+        if let retry = grokRetryAfter, retry > Date(), grokLastError != nil {
+            info("下次自动重试：\(timeFormatter.string(from: retry))")
+        }
+        info("只读订阅额度接口，不发起推理、不消耗额度；凭证过期时自动让 Grok CLI 续期")
+        action(grokRefreshInProgress ? "正在刷新 Grok…" : "立即刷新 Grok 额度", selector: #selector(refreshGrokNow)).isEnabled = !grokRefreshInProgress
+        targetMenu.addItem(.separator())
         info("账号周期重置：\(countdownText)")
         if let reset = snapshot?.chosenWindow(selection: selection)?.resetDate {
             info(ResetCountdown.detail(until: reset, timezone: displayTimezone))
@@ -574,8 +732,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         countdownItem.state = showCountdown ? .on : .off
         let claudeItem = action("菜单栏包含 Claude", selector: #selector(toggleClaudeUsage))
         claudeItem.state = showClaudeUsage ? .on : .off
+        let baiItem = action("菜单栏包含 B.AI", selector: #selector(toggleBAIUsage))
+        baiItem.state = showBAIUsage ? .on : .off
         let deepSeekItem = action("菜单栏包含 DeepSeek 余额", selector: #selector(toggleDeepSeekUsage))
         deepSeekItem.state = showDeepSeekUsage ? .on : .off
+        let grokItem = action("菜单栏包含 Grok 额度", selector: #selector(toggleGrokUsage))
+        grokItem.state = showGrokUsage ? .on : .off
         targetMenu.addItem(.separator())
         if demoScenario == nil && activeTiboAlert == nil && displayTiboMessage == nil {
             info(announcementDataStale ? "Tibo：消息来源待更新" : "Tibo：暂无可查看的真实新消息")
@@ -747,19 +909,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateDisplay(); rebuildMenu()
     }
 
-    private func invalidateProviderRequest() {
-        providerGate.invalidate()
-        claudeRefreshInProgress = false
-        claudeLastError = nil
-        claudeFailureCount = 0
-        claudeRetryAfter = nil
-    }
-
-    @objc private func selectClaudeProvider(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let provider = ClaudeProvider(rawValue: raw), provider != claudeProvider else { return }
-        preferences.set(provider.rawValue, forKey: ClaudeProvider.preferenceKey)
-        invalidateProviderRequest()
-        updateDisplay(); rebuildMenu(); refreshClaude()
+    @objc private func toggleGrokUsage() {
+        preferences.set(!showGrokUsage, forKey: "showGrokUsage")
+        updateDisplay(); rebuildMenu()
     }
 
     @objc private func configureBAIKey() {
@@ -786,7 +938,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             try BAIKeyStore.save(key)
             BAICache.clear(); baiBalance = nil
-            if claudeProvider == .bai { invalidateProviderRequest(); updateDisplay(); rebuildMenu(); refreshClaude() }
+            baiLastError = nil; baiFailureCount = 0; baiRetryAfter = nil
+            updateDisplay(); rebuildMenu(); refreshBAI(force: true)
         } catch {
             let failure = NSAlert(); failure.messageText = BAIError.keychain.localizedDescription; failure.runModal()
         }
@@ -794,6 +947,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleClaudeUsage() {
         preferences.set(!showClaudeUsage, forKey: "showClaudeUsage")
+        updateDisplay(); rebuildMenu()
+    }
+
+    @objc private func toggleBAIUsage() {
+        preferences.set(!showBAIUsage, forKey: "showBAIUsage")
         updateDisplay(); rebuildMenu()
     }
 
@@ -972,7 +1130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func writeStatus() {
         guard !headlessTestMode else { return }
         var status: [String: Any] = [
-            "appVersion": "1.6.5",
+            "appVersion": "1.7.0",
             "demoMode": demoScenario != nil, "demoScenario": demoScenario?.rawValue ?? "",
             "demoOperationLog": demoScenario == nil ? [] : demoExecutionLog,
             "timezone": displayTimezone.identifier, "processId": ProcessInfo.processInfo.processIdentifier,
@@ -998,19 +1156,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "tiboSupplementalLinkCount": supplementalPostIDs.count,
             "claudeCheckIntervalSeconds": Int(claudeRefreshInterval),
             "claudeNextAttemptAt": claudeRetryAfter.map { ISO8601DateFormatter().string(from: $0) } ?? "",
-            "claudeProvider": claudeProvider.rawValue,
-            "claudeSource": claudeProvider.source,
-            "claudeProviderText": providerText,
-            "claudeStale": providerStale,
+            "claudeSource": "https://api.anthropic.com/api/oauth/usage",
+            "claudeText": claudeText,
+            "claudeStale": claudeDataStale,
             "claudeRefreshing": claudeRefreshInProgress,
-            "claudeMenuBarVisible": showClaudeUsage
+            "claudeMenuBarVisible": showClaudeUsage,
+            "baiSource": BAIEndpoint.balance,
+            "baiCheckIntervalSeconds": Int(baiRefreshInterval),
+            "baiNextAttemptAt": baiRetryAfter.map { ISO8601DateFormatter().string(from: $0) } ?? "",
+            "baiText": baiText,
+            "baiStale": baiDataStale,
+            "baiRefreshing": baiRefreshInProgress,
+            "baiMenuBarVisible": showBAIUsage,
+            "baiUnit": "Credits"
         ]
-        if claudeProvider == .bai, let balance = baiBalance {
+        if let balance = baiBalance {
             status["baiBalanceCredits"] = balance.available.map { $0 as Any } ?? NSNull()
             status["baiLastUpdatedAt"] = ISO8601DateFormatter().string(from: balance.fetchedAt)
-            status["baiUnit"] = "Credits"
         }
-        if claudeProvider == .official, let claudeSnapshot {
+        if let claudeSnapshot {
             status["claudeLastUpdatedAt"] = ISO8601DateFormatter().string(from: claudeSnapshot.fetchedAt)
             status["claudeWindows"] = claudeSnapshot.windows.map { window -> [String: Any] in
                 var entry: [String: Any] = ["period": window.durationLabel]
@@ -1028,6 +1192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         if let claudeLastError { status["claudeError"] = claudeLastError }
+        if let baiLastError { status["baiError"] = baiLastError }
         status["deepSeekSource"] = "https://api.deepseek.com/user/balance"
         status["deepSeekCheckIntervalSeconds"] = Int(deepSeekRefreshInterval)
         status["deepSeekMenuBarVisible"] = showDeepSeekUsage
@@ -1043,6 +1208,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status["deepSeekLastUpdatedAt"] = ISO8601DateFormatter().string(from: balance.fetchedAt)
         }
         if let deepSeekLastError { status["deepSeekError"] = deepSeekLastError }
+        status["grokSource"] = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+        status["grokCheckIntervalSeconds"] = Int(grokRefreshInterval)
+        status["grokMenuBarVisible"] = showGrokUsage
+        status["grokStale"] = grokDataStale
+        status["grokRefreshing"] = grokRefreshInProgress
+        status["grokScope"] = "accountPeriod"
+        status["grokNextAttemptAt"] = grokRetryAfter.map { ISO8601DateFormatter().string(from: $0) } ?? ""
+        if let grokSnapshot {
+            status["grokLastUpdatedAt"] = ISO8601DateFormatter().string(from: grokSnapshot.fetchedAt)
+            status["grokPeriod"] = grokSnapshot.periodLabel
+            status["grokPeriodType"] = grokSnapshot.periodType ?? ""
+            status["grokUsagePercent"] = grokSnapshot.usedPercent ?? NSNull()
+            status["grokRemainingPercent"] = grokSnapshot.window?.remainingPercent ?? NSNull()
+            status["grokPrepaidBalance"] = grokSnapshot.prepaidBalance ?? NSNull()
+            status["grokUnifiedBilling"] = grokSnapshot.isUnifiedBilling
+            if let start = grokSnapshot.periodStart { status["grokPeriodStartAt"] = ISO8601DateFormatter().string(from: start) }
+            if let reset = grokSnapshot.periodEnd {
+                status["grokResetAt"] = ISO8601DateFormatter().string(from: reset)
+                status["grokResetLocalTime"] = ResetCountdown.detail(until: reset, timezone: displayTimezone)
+            }
+            if let percent = grokPercent, !isStale { status["grokDisplayedPercent"] = percent }
+            status["grokProducts"] = grokSnapshot.products.map { ["product": $0.product, "usedPercent": $0.usedPercent] }
+            if let plan = grokSnapshot.plan {
+                status["grokPlan"] = plan.plan
+                status["grokPlanDisplay"] = plan.displayName
+                status["grokPlanActive"] = plan.active
+                status["grokPlanRenewsAt"] = plan.renewsAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
+            }
+        }
+        if let grokLastError { status["grokError"] = grokLastError }
         if let snapshot {
             status["lastUpdatedAt"] = ISO8601DateFormatter().string(from: snapshot.fetchedAt)
             status["codexWindows"] = snapshot.windows.map { window -> [String: Any] in
@@ -1429,35 +1624,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         delegate.headlessTestMode = true
         var checks = 0
         func expect(_ condition: Bool, _ message: String) { precondition(condition, message); checks += 1 }
-        expect(delegate.claudeProvider == .official, "Default official")
         delegate.selection = .shortTerm
         delegate.claudeSnapshot = ClaudeSnapshot(fiveHour: UsageWindow(usedPercent: 25, windowDurationMins: 300, resetsAt: nil), sevenDay: nil)
         delegate.rebuildMenu()
-        expect(delegate.menu.items.contains { $0.title == ClaudeProvider.official.title && $0.state == .on }, "Official menu selected")
-        expect(delegate.providerText == "75%", "Official percentage")
-        let officialTitle = ProviderBadge.title(segments: [.init(label: delegate.claudeProvider.label, value: delegate.providerText, stale: false)], countdown: "", alert: nil, fallbackIndicator: "", imminent: false, dark: false, readIndicator: "").string
-        expect(officialTitle.contains("Claude") && officialTitle.contains("75%"), "Official AppKit title")
-        let switchItem = delegate.menu.items.first { ($0.representedObject as? String) == "bai" }!
-        delegate.claudeRetryAfter = Date().addingTimeInterval(1800)
-        let oldTicket = delegate.providerGate.generation
-        delegate.selectClaudeProvider(switchItem)
-        expect(delegate.claudeProvider == .bai, "Menu action selects BAI")
-        expect(delegate.claudeRetryAfter == nil, "Retry isolated on switch")
-        expect(!delegate.providerGate.accepts(oldTicket), "Previous completion rejected")
-        expect(delegate.providerText == "--", "No official value leaks into BAI")
-        expect(delegate.menu.items.contains { $0.title == ClaudeProvider.bai.title && $0.state == .on }, "BAI menu selected")
+        expect(delegate.claudeText == "75%", "Claude official percentage")
+        expect(delegate.baiText == "--", "B.AI unknown without a balance")
+        expect(!delegate.menu.items.contains { $0.title.contains("Claude 服务来源") }, "Claude source picker is gone")
+        expect(delegate.menu.items.contains { $0.title == "Claude Code · 官方订阅剩余额度" }, "Claude section present")
+        expect(delegate.menu.items.contains { $0.title.hasPrefix("B.AI · 第三方余额") }, "B.AI section present")
         let balance = try! BAIBalance.parse(Data(#"{"success":true,"data":{"api_key_type":"personal","personal_balance":12345}}"#.utf8))
         delegate.baiBalance = balance
         delegate.selection = .weekly
-        expect(delegate.providerText == "12.3K", "Credits shown in K units, independent of period")
-        let title = ProviderBadge.title(segments: [.init(label: delegate.claudeProvider.label, value: delegate.providerText, stale: false)], countdown: "", alert: nil, fallbackIndicator: "", imminent: false, dark: false, readIndicator: "").string
-        expect(title.contains("B.AI") && title.contains("12.3K") && !title.contains("%") && !title.contains("$"), "Rendered AppKit title uses K credits")
-        let restarted = AppDelegate(preferences: UserDefaults(suiteName: suite)!)
-        expect(restarted.claudeProvider == .bai, "Selection persists across delegates")
-        delegate.selectClaudeProvider(delegate.menu.items.first { ($0.representedObject as? String) == "official" }!)
-        expect(delegate.providerText == "75%", "Official cache preserved")
-        expect(!delegate.providerGate.accepts(oldTicket), "A-B-A rejects original ticket")
-        print("Provider UI diagnostic: official 75%; B.AI 12.3K; menu selection and persistence verified")
+        expect(delegate.baiText == "12.3K", "B.AI credits in K units, independent of period")
+        expect(delegate.claudeText == "75%", "B.AI reading never overwrites Claude")
+        let badge = ProviderBadge.title(segments: [
+            .init(label: "Claude", value: delegate.claudeText, stale: delegate.claudeDataStale),
+            .init(label: BAIEndpoint.label, value: delegate.baiText, stale: delegate.baiDataStale)
+        ], countdown: "", alert: nil, fallbackIndicator: "", imminent: false, dark: false, readIndicator: "").string
+        expect(badge.contains("Claude") && badge.contains("75%") && badge.contains("B.AI") && badge.contains("12.3K"), "Claude and B.AI render side by side")
+        expect(!badge.contains("$"), "Credits are not rendered as currency")
+        expect(delegate.showClaudeUsage && delegate.showBAIUsage, "Both badges shown by default")
+        delegate.toggleBAIUsage()
+        expect(!delegate.showBAIUsage && delegate.showClaudeUsage, "B.AI toggle leaves Claude alone")
+        delegate.toggleBAIUsage()
+        expect(delegate.showBAIUsage, "B.AI toggle restores the badge")
+        delegate.claudeRetryAfter = Date().addingTimeInterval(1800)
+        expect(delegate.baiText == "12.3K", "Claude backoff does not blank B.AI")
+        // Grok：自己的周期（每周），不走 Codex/Claude 的 5 小时/每周开关。
+        let grokNow = Date()
+        delegate.grokSnapshot = GrokSnapshot(
+            usedPercent: 76,
+            periodStart: grokNow.addingTimeInterval(-86_400),
+            periodEnd: grokNow.addingTimeInterval(7 * 86_400),
+            periodType: "USAGE_PERIOD_TYPE_WEEKLY",
+            products: [GrokProductUsage(product: "GrokBot", usedPercent: 52)],
+            plan: GrokPlanInfo(plan: "supergrok", tier: "SUBSCRIPTION_TIER_GROK_PRO", active: true, renewsAt: nil, cancelAtPeriodEnd: false))
+        expect(delegate.grokText == "24%", "Grok remaining percent")
+        expect(delegate.showGrokUsage, "Grok badge shown by default")
+        delegate.toggleGrokUsage()
+        expect(!delegate.showGrokUsage, "Grok toggle hides the badge")
+        delegate.toggleGrokUsage()
+        expect(delegate.showGrokUsage, "Grok toggle restores the badge")
+        let grokTitle = ProviderBadge.title(segments: [.init(label: "Grok", value: delegate.grokText, stale: false)], countdown: "", alert: nil, fallbackIndicator: "", imminent: false, dark: false, readIndicator: "").string
+        expect(grokTitle.contains("Grok") && grokTitle.contains("24%"), "Grok AppKit title")
+        print("Provider UI diagnostic: official 75%; B.AI 12.3K; Grok 24%; menu selection and persistence verified")
         return checks
     }
 
@@ -1597,7 +1807,7 @@ enum AgentBatteryApp {
         if arguments.contains("--check-bai") {
             do {
                 let balance = try BAIClient().fetch()
-                let summary: [String: Any] = ["source": ClaudeProvider.bai.source, "unit": "Credits", "available": balance.available.map { $0 as Any } ?? NSNull(), "keyType": balance.keyType, "menuBarText": balance.compactText, "exactText": balance.text]
+                let summary: [String: Any] = ["source": BAIEndpoint.balance, "unit": "Credits", "available": balance.available.map { $0 as Any } ?? NSNull(), "keyType": balance.keyType, "menuBarText": balance.compactText, "exactText": balance.text]
                 let data = try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])
                 print(String(decoding: data, as: UTF8.self))
             } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
@@ -1681,6 +1891,32 @@ enum AgentBatteryApp {
                     "toppedUpToday": (state.toppedUpToday * 100).rounded() / 100,
                     "menuBarText": balance.compactText
                 ]
+                let data = try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])
+                print(String(decoding: data, as: UTF8.self))
+            } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+            return
+        }
+        if arguments.contains("--check-grok") {
+            do {
+                let snapshot = try GrokUsageClient().fetch()
+                var summary: [String: Any] = [
+                    "source": "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+                    "period": snapshot.periodLabel,
+                    "unifiedBilling": snapshot.isUnifiedBilling
+                ]
+                summary["usagePercent"] = snapshot.usedPercent ?? NSNull()
+                summary["remainingPercent"] = snapshot.window?.remainingPercent ?? NSNull()
+                summary["prepaidBalance"] = snapshot.prepaidBalance ?? NSNull()
+                if let reset = snapshot.periodEnd {
+                    summary["resetAt"] = ISO8601DateFormatter().string(from: reset)
+                    summary["resetLocalTime"] = ResetCountdown.detail(until: reset, timezone: TimeZone(identifier: "Asia/Shanghai")!)
+                }
+                summary["products"] = snapshot.productSummary
+                if let plan = snapshot.plan {
+                    summary["plan"] = plan.displayName
+                    summary["planActive"] = plan.active
+                    summary["planRenewsAt"] = plan.renewsAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
+                }
                 let data = try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])
                 print(String(decoding: data, as: UTF8.self))
             } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }

@@ -1,6 +1,6 @@
 import Foundation
 
-@main enum ClaudeProviderTests {
+@main enum BAIUsageTests {
     static func main() throws {
         var count = 0
         func expect(_ value: Bool, _ message: String) { precondition(value, message); count += 1 }
@@ -58,9 +58,7 @@ import Foundation
             expect(BAIKeyStore.configuredKey(["ANTHROPIC_BASE_URL":base, "ANTHROPIC_API_KEY":"test-only"]) == nil, "Other host forbidden")
         }
         expect(BAIKeyStore.configuredKey(["ANTHROPIC_API_KEY":"test-only"]) == nil, "Unbound key forbidden")
-        var gate = ProviderRequestGate(); let old = gate.generation; gate.invalidate(); gate.invalidate()
-        expect(!gate.accepts(old) && gate.accepts(gate.generation), "A-B-A race")
         expect(BAICache.url != ClaudeUsageCache.fileURL, "Provider caches isolated")
-        print("ClaudeProviderTests: \(count) checks passed")
+        print("BAIUsageTests: \(count) checks passed")
     }
 }

@@ -9,12 +9,12 @@ SOURCE = {
     'AlertAppearance', 'App', 'TiboResetMonitor', 'DemoPreview', 'PersonalPlan',
     'TiboAlert', 'LoginLaunch', 'ResetAnnouncementTime', 'TiboPostLink',
     'BatteryIcon', 'UsageClient', 'UsageModels', 'ResetCountdown',
-    'ClaudeProvider', 'ClaudeUsage', 'DeepSeekUsage', 'PasteableSecureTextField', 'ProviderBadge',
+    'BAIUsage', 'GrokUsage', 'ClaudeUsage', 'DeepSeekUsage', 'PasteableSecureTextField', 'ProviderBadge',
 }
 TESTS = {
     'UsageModelsTests', 'UsageClientTests', 'ResetCountdownTests',
     'TiboResetMonitorTests', 'TiboAlertTests', 'ResetAnnouncementTimeTests',
-    'TiboPostLinkTests', 'ClaudeProviderTests', 'ClaudeWindowTests', 'DeepSeekSpendTests',
+    'TiboPostLinkTests', 'BAIUsageTests', 'GrokUsageTests', 'ClaudeWindowTests', 'DeepSeekSpendTests',
 }
 ALLOWED = {f'Source/{name}.swift' for name in SOURCE} | {
     f'Tests/{name}.swift' for name in TESTS

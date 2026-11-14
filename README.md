@@ -2,7 +2,7 @@
 
 macOS 菜单栏中的 AI 账户额度与余额工具，使用 Swift / AppKit，支持 macOS 14 及以上。
 
-本项目派生自 [Carolyn-ai/codex-battery](https://github.com/Carolyn-ai/codex-battery)，保留上游 Ling Talk AI 的 MIT 许可证及署名。在上游 Codex 工具基础上加入 Claude 官方订阅、B.AI、DeepSeek 与安全密钥输入等功能。当前源码版本为 **1.6.5**；这是独立源码项目，安装包发布由维护者另行安排。
+本项目派生自 [Carolyn-ai/codex-battery](https://github.com/Carolyn-ai/codex-battery)，保留上游 Ling Talk AI 的 MIT 许可证及署名。在上游 Codex 工具基础上加入 Claude 官方订阅、B.AI、DeepSeek、Grok 与安全密钥输入等功能。当前源码版本为 **1.7.0**；这是独立源码项目，安装包发布由维护者另行安排。
 
 ## 从源码构建与安装
 
@@ -25,14 +25,15 @@ cd agent-traffic-manager
 
 ## 当前功能
 
-- **文字菜单栏**：依次显示 Codex、Claude 或 B.AI、DeepSeek，可按菜单设置隐藏部分来源。
+- **文字菜单栏**：依次显示 Codex、Claude、B.AI、DeepSeek、Grok，可按菜单设置隐藏部分来源。
 - **Codex 与 Claude 官方订阅**：统一选择 5 小时或每周周期，默认 5 小时。缺少所选周期时实现会回落到可用周期，菜单详情标出实际显示项；应结合实际时长判断，不把回落值当成所选周期。
-- **Claude 第三方 B.AI**：显示 Credits，不是美元，也不受订阅周期开关影响。百万以上优先用 M，低于 100M 保留两位小数，100M 至不足 1000M 保留一位，再大取整；不足百万使用 K 或原值。菜单详情和 `status.json` 的 `baiBalanceCredits` 保留精确积分。个人余额、团队管理员余额、成员剩余配额分别解析；无限配额成员不伪造团队余额。
+- **B.AI 第三方余额**：与 Claude 并列的独立来源，显示 Credits，不是美元，也不受订阅周期开关影响。百万以上优先用 M，低于 100M 保留两位小数，100M 至不足 1000M 保留一位，再大取整；不足百万使用 K 或原值。菜单详情和 `status.json` 的 `baiBalanceCredits` 保留精确积分。个人余额、团队管理员余额、成员剩余配额分别解析；无限配额成员不伪造团队余额。
 - **安全输入 B.AI 密钥**：遮罩输入框支持 ⌘V 和“从剪贴板粘贴”，保存到系统 Keychain。已有配置只接受与 HTTPS `api.b.ai` 明确配对的密钥。
 - **DeepSeek**：显示官方余额接口返回的金额，以及本机余额差分得到的“今日花费估算”。没有从账单接口获取实际消费。
+- **Grok**：显示 SuperGrok 订阅的剩余额度百分比，按账号自己的周期（当前为每周）。只读订阅计费接口，不发起推理、不消耗额度；菜单详情含重置时间、套餐与续费日期、按产品（GrokBot/GrokBuild/Cursor）的用量归因。凭证从 Grok CLI 的 `~/.grok/auth.json` 读取，过期时自动让 CLI 续期。
 - **Codex 周期倒计时、公开重置消息、个人保留线与便签、时区设置、隔离演示**：公开消息与本人账户额度分开，不把公告当成账号到账证明。
 
-常规刷新间隔为 Codex 60 秒、Claude/B.AI 5 分钟、DeepSeek 10 分钟；菜单打开、唤醒和会话激活也触发刷新，失败、在途请求及退避会影响实际执行。公共消息单独刷新。离线、限流或缺少凭证时应结合错误和更新时间判断，旧读数不代表当前余额。
+常规刷新间隔为 Codex 60 秒、Claude 5 分钟、B.AI 5 分钟、DeepSeek 10 分钟、Grok 5 分钟；菜单打开、唤醒和会话激活也触发刷新，失败、在途请求及退避会影响实际执行。公共消息单独刷新。离线、限流或缺少凭证时应结合错误和更新时间判断，旧读数不代表当前余额。
 
 ## DeepSeek 估算边界
 
@@ -42,7 +43,7 @@ cd agent-traffic-manager
 
 ## 凭据、权限与数据
 
-Codex 使用本机已登录的 `codex app-server` 只读查询。Claude 官方订阅读取 Claude Code 的 Keychain OAuth 登录，必要时回退至 `~/.claude/.credentials.json`；系统可能请求钥匙串访问授权。B.AI 的自有密钥保存在本工具专属 Keychain 项。DeepSeek 从 `~/.hermes/.env`、进程环境或 Hermes 配置读取已有密钥，目前没有独立的 DeepSeek 密钥录入入口。
+Codex 使用本机已登录的 `codex app-server` 只读查询。Claude 官方订阅读取 Claude Code 的 Keychain OAuth 登录，必要时回退至 `~/.claude/.credentials.json`；系统可能请求钥匙串访问授权。B.AI 的自有密钥保存在本工具专属 Keychain 项。DeepSeek 从 `~/.hermes/.env`、进程环境或 Hermes 配置读取已有密钥，目前没有独立的 DeepSeek 密钥录入入口。Grok 读取 Grok CLI 的 `~/.grok/auth.json` 登录令牌，只读不改写；令牌过期时自动运行 `grok models` 让 CLI 自行续期。
 
 程序需要网络、这些指定配置的读取权限、保存自身偏好/缓存与可选启动项的权限。它未使用 App Sandbox；不需要授予辅助功能、屏幕录制或完全磁盘访问权限来查询额度。没有遥测或作者接收端；供应商及公开消息网站仍可获得常规网络连接信息。详见 [隐私说明](PRIVACY.md) 与 [使用说明](docs/使用说明.md)。不要公开运行状态、密钥、配置和备份。
 
@@ -57,4 +58,4 @@ python3 scripts/privacy_check.py
 
 `test.sh` 直接传播失败退出码，测试使用合成夹具和隔离偏好，不查询真实账户；安装测试只使用临时目标，不启动或替换日常应用。自测中的数字不是当前账户余额。`package.sh` 默认构建 Apple Silicon / Intel 通用包，按应用版本命名；`--no-build` 仅打包现有产物，不保证其架构。
 
-GitHub Actions 仅保留 macOS 源码检查与测试，不自动提交、推送或发布。MIT 许可见 [LICENSE](LICENSE)。本项目与 OpenAI、Anthropic、B.AI、DeepSeek 无隶属关系，服务协议或接口变更可能影响可用性。
+GitHub Actions 仅保留 macOS 源码检查与测试，不自动提交、推送或发布。MIT 许可见 [LICENSE](LICENSE)。本项目与 OpenAI、Anthropic、B.AI、DeepSeek、xAI 无隶属关系，服务协议或接口变更可能影响可用性。

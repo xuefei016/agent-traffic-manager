@@ -1,23 +1,11 @@
 import Foundation
 import Security
 
-/// Add supported providers here; never present an unimplemented vendor.
-enum ClaudeProvider: String, CaseIterable {
-    case official, bai
-    static let preferenceKey = "claudeProvider"
-    var title: String { self == .official ? "官方订阅（Claude）" : "第三方 · B.AI" }
-    var label: String { self == .official ? "Claude" : "B.AI" }
-    var source: String { self == .official ? "https://api.anthropic.com/api/oauth/usage" : "https://api.b.ai/v1/balance" }
-    static func selected(in preferences: UserDefaults) -> Self {
-        Self(rawValue: preferences.string(forKey: preferenceKey) ?? "") ?? .official
-    }
-}
-
-/// A generation also invalidates A → B → A and key changes while a request is running.
-struct ProviderRequestGate {
-    private(set) var generation = 0
-    mutating func invalidate() { generation += 1 }
-    func accepts(_ ticket: Int) -> Bool { ticket == generation }
+/// B.AI 第三方订阅：独立来源，与 Claude 官方订阅平行。
+enum BAIEndpoint {
+    static let balance = "https://api.b.ai/v1/balance"
+    static let title = "第三方 · B.AI"
+    static let label = "B.AI"
 }
 
 enum BAIError: Error, LocalizedError {
@@ -164,7 +152,7 @@ enum BAICache {
 struct BAIClient {
     func fetch() throws -> BAIBalance {
         let key = try BAIKeyStore.load()
-        var request = URLRequest(url: URL(string: ClaudeProvider.bai.source)!)
+        var request = URLRequest(url: URL(string: BAIEndpoint.balance)!)
         request.httpMethod = "GET"; request.timeoutInterval = 25
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let semaphore = DispatchSemaphore(value: 0)
