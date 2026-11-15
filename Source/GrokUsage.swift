@@ -39,12 +39,44 @@ struct GrokPlanInfo: Sendable, Equatable {
     let active: Bool
     let renewsAt: Date?
     let cancelAtPeriodEnd: Bool
+    let interval: String?
 
+    /// 显示名以可读的 tier 为准：X 会员订阅不叫 SuperGrok，
+    /// 即使 xAI 内部把它的额度记在 plan="supergrok" 名下。
     var displayName: String {
-        switch plan.lowercased() {
-        case "supergrok": return "SuperGrok"
-        case "": return tier.isEmpty ? "Grok 订阅" : tier
-        default: return plan.prefix(1).uppercased() + plan.dropFirst()
+        switch tier {
+        case "SUBSCRIPTION_TIER_X_PREMIUM_PLUS": return "X Premium+"
+        case "SUBSCRIPTION_TIER_X_PREMIUM": return "X Premium"
+        case "SUBSCRIPTION_TIER_X_BASIC": return "X Basic"
+        case "SUBSCRIPTION_TIER_GROK_PRO": return plan.lowercased() == "supergrok" ? "SuperGrok" : "Grok Pro"
+        case "SUBSCRIPTION_TIER_SUPERGROK_HEAVY": return "SuperGrok Heavy"
+        case "SUBSCRIPTION_TIER_SUPERGROK_PLUS": return "SuperGrok+"
+        case "SUBSCRIPTION_TIER_SUPERGROK_LITE": return "SuperGrok Lite"
+        case "": return plan.isEmpty ? "Grok 订阅" : plan.prefix(1).uppercased() + plan.dropFirst()
+        default: return tier.replacingOccurrences(of: "SUBSCRIPTION_TIER_", with: "")
+        }
+    }
+
+    /// 一行式订阅说明：名称 · 计费周期 · 续费日 · 是否已关闭自动续费。
+    var summary: String {
+        var parts = [displayName]
+        if let interval { parts.append(interval) }
+        if cancelAtPeriodEnd { parts.append("已关闭自动续费") }
+        else if let renewsAt {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "zh_CN")
+            formatter.dateFormat = "MM月dd日"
+            parts.append("续费 " + formatter.string(from: renewsAt))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func intervalLabel(_ raw: String?) -> String? {
+        switch raw {
+        case "BILLING_INTERVAL_MONTHLY": return "月付"
+        case "BILLING_INTERVAL_YEARLY", "BILLING_INTERVAL_ANNUAL": return "年付"
+        case "BILLING_INTERVAL_WEEKLY": return "周付"
+        default: return nil
         }
     }
 }
@@ -58,12 +90,13 @@ struct GrokSnapshot: Sendable, Equatable {
     let products: [GrokProductUsage]
     let prepaidBalance: Double?
     let isUnifiedBilling: Bool
-    let plan: GrokPlanInfo?
+    /// 账号上全部活动订阅，不只是主导那一条：X Premium+ 与 SuperGrok 可能同时存在。
+    let plans: [GrokPlanInfo]
     let fetchedAt: Date
 
     init(usedPercent: Double?, periodStart: Date?, periodEnd: Date?, periodType: String?,
          products: [GrokProductUsage] = [], prepaidBalance: Double? = nil, isUnifiedBilling: Bool = false,
-         plan: GrokPlanInfo? = nil, fetchedAt: Date = Date()) {
+         plans: [GrokPlanInfo] = [], fetchedAt: Date = Date()) {
         self.usedPercent = usedPercent.flatMap { $0.isFinite ? min(100, max(0, $0)) : nil }
         self.periodStart = periodStart
         self.periodEnd = periodEnd
@@ -71,7 +104,7 @@ struct GrokSnapshot: Sendable, Equatable {
         self.products = products
         self.prepaidBalance = prepaidBalance
         self.isUnifiedBilling = isUnifiedBilling
-        self.plan = plan
+        self.plans = plans
         self.fetchedAt = fetchedAt
     }
 
@@ -87,6 +120,18 @@ struct GrokSnapshot: Sendable, Equatable {
         return UsageWindow(usedPercent: usedPercent, windowDurationMins: periodMinutes,
                            resetsAt: periodEnd?.timeIntervalSince1970)
     }
+
+    /// 显示口径：账号同时有 X 会员与 SuperGrok 时以 X 会员那张为准，
+    /// 因为用户认知里买的是 X Premium+，SuperGrok 只是 xAI 内部的额度归属。
+    var primaryPlan: GrokPlanInfo? {
+        let active = plans.filter { $0.active }
+        let pool = active.isEmpty ? plans : active
+        return pool.first { $0.tier == "SUBSCRIPTION_TIER_X_PREMIUM_PLUS" }
+            ?? pool.first { $0.tier == "SUBSCRIPTION_TIER_X_PREMIUM" }
+            ?? pool.first
+    }
+
+    var planLabel: String { primaryPlan?.displayName ?? "订阅" }
 
     var periodLabel: String {
         if let minutes = periodMinutes, minutes == 10_080 { return "本周" }
@@ -106,7 +151,7 @@ struct GrokSnapshot: Sendable, Equatable {
             .joined(separator: " · ")
     }
 
-    static func parse(json data: Data, plan: GrokPlanInfo? = nil, fetchedAt: Date = Date()) throws -> GrokSnapshot {
+    static func parse(json data: Data, plans: [GrokPlanInfo] = [], fetchedAt: Date = Date()) throws -> GrokSnapshot {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw GrokUsageError.invalidResponse
         }
@@ -127,28 +172,33 @@ struct GrokSnapshot: Sendable, Equatable {
         guard percent != nil || end != nil else { throw GrokUsageError.invalidResponse }
         return GrokSnapshot(usedPercent: percent, periodStart: start, periodEnd: end, periodType: type,
                             products: products, prepaidBalance: prepaid, isUnifiedBilling: unified,
-                            plan: plan, fetchedAt: fetchedAt)
+                            plans: plans, fetchedAt: fetchedAt)
     }
 
     /// 套餐接口的响应用同一套 ISO8601 解析。
-    static func parsePlan(json data: Data) -> GrokPlanInfo? {
+    /// 返回账号上全部订阅（含非活动），因为同一账号可能同时挂着 X Premium+ 和 SuperGrok；
+    /// 只取 dominantPlan 会把用户的真实会员身份显示错。
+    static func parsePlans(json data: Data) -> [GrokPlanInfo] {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let subscriptions = root["subscriptions"] as? [[String: Any]] else { return nil }
-        // 同一个账号可能同时挂着 SuperGrok 和 X Premium：以 dominantPlan 为准，否则取第一份有效订阅。
-        var chosen: [String: Any]?
-        if let dominant = (root["dominantPlan"] as? [String: Any])?["plan"] as? String, !dominant.isEmpty {
-            chosen = subscriptions.first { ($0["plan"] as? String) == dominant }
+              let subscriptions = root["subscriptions"] as? [[String: Any]] else { return [] }
+        let dominant = (root["dominantPlan"] as? [String: Any])?["plan"] as? String
+        var plans = subscriptions.compactMap { entry -> GrokPlanInfo? in
+            let tier = entry["tier"] as? String ?? ""
+            let plan = entry["plan"] as? String ?? ""
+            guard !tier.isEmpty || !plan.isEmpty else { return nil }
+            return GrokPlanInfo(plan: plan,
+                                tier: tier,
+                                active: (entry["status"] as? String) == "SUBSCRIPTION_STATUS_ACTIVE",
+                                renewsAt: (entry["billingPeriodEnd"] as? String).flatMap(isoDate),
+                                cancelAtPeriodEnd: entry["cancelAtPeriodEnd"] as? Bool ?? false,
+                                interval: GrokPlanInfo.intervalLabel(entry["billingInterval"] as? String))
         }
-        if chosen == nil {
-            chosen = subscriptions.first { ($0["status"] as? String) == "SUBSCRIPTION_STATUS_ACTIVE" } ?? subscriptions.first
+        // dominantPlan 排第一，便于「额度归属哪条」一眼对上。
+        if let dominant, !dominant.isEmpty,
+           let index = plans.firstIndex(where: { $0.plan == dominant }), index > 0 {
+            plans.insert(plans.remove(at: index), at: 0)
         }
-        guard let entry = chosen else { return nil }
-        let status = entry["status"] as? String ?? ""
-        return GrokPlanInfo(plan: entry["plan"] as? String ?? "",
-                            tier: entry["tier"] as? String ?? "",
-                            active: status == "SUBSCRIPTION_STATUS_ACTIVE",
-                            renewsAt: (entry["billingPeriodEnd"] as? String).flatMap(isoDate),
-                            cancelAtPeriodEnd: entry["cancelAtPeriodEnd"] as? Bool ?? false)
+        return plans
     }
 
     private static func number(_ value: Any?) -> Double? {
@@ -199,11 +249,12 @@ enum GrokUsageCache {
             guard let name = entry["product"] as? String, let used = (entry["usedPercent"] as? NSNumber)?.doubleValue else { return nil }
             return GrokProductUsage(product: name, usedPercent: used)
         }
-        let plan = (root["plan"] as? [String: Any]).map { entry in
+        let plans = (root["plans"] as? [[String: Any]] ?? []).map { entry in
             GrokPlanInfo(plan: entry["plan"] as? String ?? "", tier: entry["tier"] as? String ?? "",
                          active: entry["active"] as? Bool ?? false,
                          renewsAt: (entry["renewsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) },
-                         cancelAtPeriodEnd: entry["cancelAtPeriodEnd"] as? Bool ?? false)
+                         cancelAtPeriodEnd: entry["cancelAtPeriodEnd"] as? Bool ?? false,
+                         interval: entry["interval"] as? String)
         }
         return GrokSnapshot(
             usedPercent: (root["usedPercent"] as? NSNumber)?.doubleValue,
@@ -213,7 +264,7 @@ enum GrokUsageCache {
             products: products,
             prepaidBalance: (root["prepaidBalance"] as? NSNumber)?.doubleValue,
             isUnifiedBilling: root["isUnifiedBilling"] as? Bool ?? false,
-            plan: plan,
+            plans: plans,
             fetchedAt: fetched)
     }
 
@@ -228,10 +279,11 @@ enum GrokUsageCache {
         root["periodEnd"] = snapshot.periodEnd?.timeIntervalSince1970 as Any? ?? NSNull()
         root["periodType"] = snapshot.periodType as Any? ?? NSNull()
         root["prepaidBalance"] = snapshot.prepaidBalance as Any? ?? NSNull()
-        if let plan = snapshot.plan {
-            root["plan"] = ["plan": plan.plan, "tier": plan.tier, "active": plan.active,
-                            "renewsAt": plan.renewsAt?.timeIntervalSince1970 as Any? ?? NSNull(),
-                            "cancelAtPeriodEnd": plan.cancelAtPeriodEnd]
+        root["plans"] = snapshot.plans.map { plan -> [String: Any] in
+            ["plan": plan.plan, "tier": plan.tier, "active": plan.active,
+             "renewsAt": plan.renewsAt?.timeIntervalSince1970 as Any? ?? NSNull(),
+             "cancelAtPeriodEnd": plan.cancelAtPeriodEnd,
+             "interval": plan.interval as Any? ?? NSNull()]
         }
         guard let data = try? JSONSerialization.data(withJSONObject: root) else { return }
         try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -352,9 +404,9 @@ struct GrokUsageClient: Sendable {
         default: throw GrokUsageError.invalidResponse
         }
         // 套餐信息只是补充展示，拿不到就当没有，不影响用量读数。
-        let plan = (try? get(planEndpoint, token: credentials.accessToken))
-            .flatMap { $0.1.statusCode == 200 ? GrokSnapshot.parsePlan(json: $0.0) : nil }
-        return try GrokSnapshot.parse(json: data, plan: plan)
+        let plans = (try? get(planEndpoint, token: credentials.accessToken))
+            .flatMap { $0.1.statusCode == 200 ? GrokSnapshot.parsePlans(json: $0.0) : [] } ?? []
+        return try GrokSnapshot.parse(json: data, plans: plans)
     }
 
     private func get(_ url: URL, token: String) throws -> (Data, HTTPURLResponse) {

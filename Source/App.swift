@@ -542,7 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             : ""
         let grokResetDetail = grokWindow?.resetDate.map { ResetCountdown.detail(until: $0, timezone: displayTimezone) } ?? "账号暂未提供重置时间"
         let grokTip = showGrokUsage
-            ? "\n\nGrok \(grokSnapshot?.plan?.displayName ?? "订阅")·\(grokSnapshot?.periodLabel ?? "当前周期")剩余 \(grokDataStale ? "--" : grokText)\n周期重置：\(grokResetDetail)\(grokSnapshot.map { $0.productSummary.isEmpty ? "" : "\n用量明细：\($0.productSummary)" } ?? "")"
+            ? "\n\nGrok \(grokSnapshot?.planLabel ?? "订阅")·\(grokSnapshot?.periodLabel ?? "当前周期")剩余 \(grokDataStale ? "--" : grokText)\n周期重置：\(grokResetDetail)\(grokSnapshot.map { $0.productSummary.isEmpty ? "" : "\n用量明细：\($0.productSummary)" } ?? "")"
             : ""
         let baiTip = showBAIUsage
             ? "\n\nB.AI 可用：\(baiText)（精确 \(baiBalance?.text ?? "未知")）\n菜单栏按 M/K 缩写；不适用订阅周期"
@@ -701,18 +701,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         action("校准今日已花费…", selector: #selector(calibrateDeepSeekSpend)).isEnabled = deepSeekBalance != nil
         action(deepSeekRefreshInProgress ? "正在刷新 DeepSeek…" : "立即刷新 DeepSeek 余额", selector: #selector(refreshDeepSeekNow)).isEnabled = !deepSeekRefreshInProgress
         targetMenu.addItem(.separator())
-        info("Grok · \(grokSnapshot?.plan?.displayName ?? "订阅")额度（按账号自己的周期）")
+        info("Grok · \(grokSnapshot?.planLabel ?? "订阅")额度（按账号自己的周期）")
         if let grokSnapshot {
             let staleSuffix = grokDataStale ? "（上次读数）" : ""
             info("\(grokSnapshot.periodLabel)剩余：\(grokPercent.map { "\($0)%" } ?? "未知")\(staleSuffix)")
             if let reset = grokSnapshot.periodEnd {
                 info("  周期重置：\(resetFormatter.string(from: reset))")
             }
-            if let plan = grokSnapshot.plan {
-                var line = plan.active ? "订阅有效：\(plan.displayName)" : "订阅状态待确认：\(plan.displayName)"
-                if plan.cancelAtPeriodEnd { line += "（已关闭自动续费）" }
-                if let renews = plan.renewsAt { line += " · 续费 \(resetFormatter.string(from: renews))" }
-                info(line)
+            if !grokSnapshot.plans.isEmpty {
+                info("账号订阅：")
+                for plan in grokSnapshot.plans {
+                    info("  \(plan.active ? "✓" : "·") \(plan.summary)")
+                }
+                if grokSnapshot.plans.contains(where: { $0.active && $0.tier == "SUBSCRIPTION_TIER_X_PREMIUM_PLUS" }) {
+                    info("  额度归属以 xAI 记为 \(grokSnapshot.plans.first?.displayName ?? "订阅")，两者共用同一份额度")
+                }
             }
             if !grokSnapshot.productSummary.isEmpty {
                 info("用量归因（同一额度按产品拆分，不相加）：\(grokSnapshot.productSummary)")
@@ -1245,11 +1248,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             if let percent = grokPercent, !isStale { status["grokDisplayedPercent"] = percent }
             status["grokProducts"] = grokSnapshot.products.map { ["product": $0.product, "usedPercent": $0.usedPercent] }
-            if let plan = grokSnapshot.plan {
-                status["grokPlan"] = plan.plan
-                status["grokPlanDisplay"] = plan.displayName
-                status["grokPlanActive"] = plan.active
-                status["grokPlanRenewsAt"] = plan.renewsAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
+            status["grokPlanDisplay"] = grokSnapshot.planLabel
+            status["grokPlans"] = grokSnapshot.plans.map { plan -> [String: Any] in
+                ["plan": plan.plan, "tier": plan.tier, "display": plan.displayName,
+                 "active": plan.active, "interval": plan.interval as Any? ?? NSNull(),
+                 "renewsAt": plan.renewsAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""]
+            }
+            if let primary = grokSnapshot.primaryPlan {
+                status["grokPlan"] = primary.plan
+                status["grokPlanActive"] = primary.active
+                status["grokPlanRenewsAt"] = primary.renewsAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
             }
         }
         if let grokLastError { status["grokError"] = grokLastError }
@@ -1678,7 +1686,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             periodEnd: grokNow.addingTimeInterval(7 * 86_400),
             periodType: "USAGE_PERIOD_TYPE_WEEKLY",
             products: [GrokProductUsage(product: "GrokBot", usedPercent: 52)],
-            plan: GrokPlanInfo(plan: "supergrok", tier: "SUBSCRIPTION_TIER_GROK_PRO", active: true, renewsAt: nil, cancelAtPeriodEnd: false))
+            plans: [GrokPlanInfo(plan: "supergrok", tier: "SUBSCRIPTION_TIER_GROK_PRO", active: true,
+                                 renewsAt: nil, cancelAtPeriodEnd: false, interval: "月付")])
         expect(delegate.grokText == "24%", "Grok remaining percent")
         expect(delegate.showGrokUsage, "Grok badge shown by default")
         delegate.toggleGrokUsage()
@@ -1932,10 +1941,11 @@ enum AgentBatteryApp {
                     summary["resetLocalTime"] = ResetCountdown.detail(until: reset, timezone: TimeZone(identifier: "Asia/Shanghai")!)
                 }
                 summary["products"] = snapshot.productSummary
-                if let plan = snapshot.plan {
-                    summary["plan"] = plan.displayName
-                    summary["planActive"] = plan.active
-                    summary["planRenewsAt"] = plan.renewsAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
+                summary["plan"] = snapshot.planLabel
+                summary["plans"] = snapshot.plans.map { "\($0.displayName)[\($0.tier)] \($0.summary)\($0.active ? "" : " 非活动")" }
+                if let primary = snapshot.primaryPlan {
+                    summary["planActive"] = primary.active
+                    summary["planRenewsAt"] = primary.renewsAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
                 }
                 let data = try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])
                 print(String(decoding: data, as: UTF8.self))

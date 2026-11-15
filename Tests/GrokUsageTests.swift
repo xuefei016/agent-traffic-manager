@@ -41,21 +41,28 @@ enum GrokUsageTests {
         do { _ = try GrokSnapshot.parse(json: "{}".data(using: .utf8)!) } catch { threw = true }
         expect(threw, "Empty payload is an error")
 
-        // 套餐：同一账号同时挂着 SuperGrok 与 X Premium，以 dominantPlan 为准。
+        // 套餐：同一账号同时挂着 SuperGrok 与 X Premium+，两条都要保留。
         let planJSON = """
         {"subscriptions":[
           {"plan":"supergrok","tier":"SUBSCRIPTION_TIER_GROK_PRO","status":"SUBSCRIPTION_STATUS_ACTIVE",
-           "billingPeriodEnd":"2026-12-05T00:48:22Z","cancelAtPeriodEnd":false},
+           "billingPeriodEnd":"2026-12-05T00:48:22Z","cancelAtPeriodEnd":false,"billingInterval":"BILLING_INTERVAL_MONTHLY"},
           {"tier":"SUBSCRIPTION_TIER_X_PREMIUM_PLUS","status":"SUBSCRIPTION_STATUS_ACTIVE"}],
          "dominantPlan":{"plan":"supergrok"}}
         """.data(using: .utf8)!
-        let plan = GrokSnapshot.parsePlan(json: planJSON)
-        expect(plan?.plan == "supergrok", "Dominant plan chosen")
-        expect(plan?.displayName == "SuperGrok", "Plan display name")
-        expect(plan?.active == true, "Active status parsed")
-        expect(plan?.renewsAt != nil, "Renewal date parsed")
-        let noDominant = GrokSnapshot.parsePlan(json: #"{"subscriptions":[{"tier":"SUBSCRIPTION_TIER_X_PREMIUM_PLUS","status":"SUBSCRIPTION_STATUS_ACTIVE"}]}"#.data(using: .utf8)!)
-        expect(noDominant?.plan == "" && noDominant?.displayName == "SUBSCRIPTION_TIER_X_PREMIUM_PLUS", "Falls back to active subscription and tier text")
+        let plans = GrokSnapshot.parsePlans(json: planJSON)
+        expect(plans.count == 2, "Both subscriptions are kept")
+        expect(plans.first?.plan == "supergrok", "Dominant plan listed first")
+        expect(plans.first?.displayName == "SuperGrok", "GROK_PRO displays as SuperGrok")
+        expect(plans.first?.interval == "月付", "Monthly interval is readable")
+        expect(plans.first?.renewsAt != nil, "Renewal date parsed")
+        expect(plans.last?.displayName == "X Premium+", "X Premium+ keeps its own name, not SuperGrok")
+        let premiumOnly = GrokSnapshot.parsePlans(json: #"{"subscriptions":[{"tier":"SUBSCRIPTION_TIER_X_PREMIUM_PLUS","status":"SUBSCRIPTION_STATUS_ACTIVE"}],"dominantPlan":{"plan":"supergrok"}}"#.data(using: .utf8)!)
+        expect(premiumOnly.count == 1 && premiumOnly.first?.displayName == "X Premium+", "Missing dominant entry does not drop X Premium+")
+        // 显示口径：有 X Premium+ 时以它命名，SuperGrok 只是额度归属
+        let snapshotWithPlans = try! GrokSnapshot.parse(json: json, plans: plans)
+        expect(snapshotWithPlans.planLabel == "X Premium+", "Account label follows X Premium+ when present")
+        let superOnly = try! GrokSnapshot.parse(json: json, plans: [plans.first!])
+        expect(superOnly.planLabel == "SuperGrok", "SuperGrok-only account keeps SuperGrok label")
 
         // 凭证：只认 auth.x.ai 条目，过期就报过期，多个账号取最晚到期的可用条目。
         // 凭证时间必须相对当前时刻生成，写死日期会随日历过期，让测试某天突然失败。

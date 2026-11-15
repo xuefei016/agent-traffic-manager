@@ -7,6 +7,7 @@
 - 凭证过期时自动调用 Grok CLI（`grok models`，无副作用）续期；续期仍失败才提示手动 `grok login`。
 - **B.AI 从 Claude 的子选项拆成独立来源**：菜单栏并列 Codex · Claude · B.AI · DeepSeek · Grok，各自独立缓存、退避与显示开关；Claude 只代表官方订阅，不再承载「官方 / 第三方」切换。
 - `status.json` 新增 `grok*` 与独立 `bai*` 字段，`--check-grok`、`--check-bai` 可独立核对。
+- Grok 套餐名不再硬编码为 SuperGrok：账号同时有 X Premium+ 与 SuperGrok 时按 X 会员命名，菜单列出全部订阅与各自计费周期（`grokPlans`）。
 
 ## 1.6.5
 
