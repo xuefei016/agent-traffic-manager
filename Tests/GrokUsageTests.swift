@@ -58,10 +58,15 @@ enum GrokUsageTests {
         expect(noDominant?.plan == "" && noDominant?.displayName == "SUBSCRIPTION_TIER_X_PREMIUM_PLUS", "Falls back to active subscription and tier text")
 
         // 凭证：只认 auth.x.ai 条目，过期就报过期，多个账号取最晚到期的可用条目。
+        // 凭证时间必须相对当前时刻生成，写死日期会随日历过期，让测试某天突然失败。
         let token = "header.payload.signature"
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        let freshExpiry = fmt.string(from: Date().addingTimeInterval(6 * 3_600))
+        let staleExpiry = fmt.string(from: Date().addingTimeInterval(-3_600))
         let creds = """
-        {"https://auth.x.ai::client-a":{"key":"\(token)","email":"a@example.com","expires_at":"2026-11-14T11:45:33.370730Z","oidc_issuer":"https://auth.x.ai"},
-         "https://other.example::client-b":{"key":"other","expires_at":"2026-11-14T11:45:33.370730Z"}}
+        {"https://auth.x.ai::client-a":{"key":"\(token)","email":"a@example.com","expires_at":"\(freshExpiry)","oidc_issuer":"https://auth.x.ai"},
+         "https://other.example::client-b":{"key":"other","expires_at":"\(freshExpiry)"}}
         """
         let parsed = GrokCredentialStore.parse(creds.data(using: .utf8)!)
         expect(parsed.count == 1, "Only auth.x.ai entries are used")
@@ -70,8 +75,8 @@ enum GrokUsageTests {
         let expiredCreds = #"{"https://auth.x.ai::client-x":{"key":"old","expires_at":"2020-01-01T00:00:00Z","oidc_issuer":"https://auth.x.ai"}}"#.data(using: .utf8)!
         expect(GrokCredentialStore.parse(expiredCreds).first?.isExpired(at: Date()) == true, "Expiry is detected")
         let twoAccounts = """
-        {"https://auth.x.ai::client-old":{"key":"old","expires_at":"2026-11-14T06:00:00Z","oidc_issuer":"https://auth.x.ai"},
-         "https://auth.x.ai::client-new":{"key":"new","expires_at":"2026-11-14T12:00:00Z","oidc_issuer":"https://auth.x.ai"}}
+        {"https://auth.x.ai::client-old":{"key":"old","expires_at":"\(staleExpiry)","oidc_issuer":"https://auth.x.ai"},
+         "https://auth.x.ai::client-new":{"key":"new","expires_at":"\(freshExpiry)","oidc_issuer":"https://auth.x.ai"}}
         """
         let best = GrokCredentialStore.parse(twoAccounts.data(using: .utf8)!)
             .filter { !$0.isExpired(at: Date()) }

@@ -100,6 +100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         usageDataStale
             || (snapshot?.chosenWindow(selection: selection)?.resetDate.map { $0 <= Date() } ?? false)
     }
+    private var showCodexUsage: Bool {
+        preferences.object(forKey: "showCodexUsage") == nil || preferences.bool(forKey: "showCodexUsage")
+    }
     private var showClaudeUsage: Bool {
         preferences.object(forKey: "showClaudeUsage") == nil || preferences.bool(forKey: "showClaudeUsage")
     }
@@ -500,7 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard enabled else { return }
             segments.append(ProviderBadge.Segment(label: label, value: stale ? "--" : value.map { "\($0)%" } ?? "--", stale: stale))
         }
-        addProvider("Codex", percent, isStale)
+        if showCodexUsage { addProvider("Codex", percent, isStale) }
         if showClaudeUsage {
             segments.append(ProviderBadge.Segment(label: "Claude", value: claudeText, stale: claudeDataStale))
         }
@@ -512,6 +515,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if showGrokUsage {
             segments.append(ProviderBadge.Segment(label: "Grok", value: grokText, stale: grokDataStale))
+        }
+        // 全部来源都隐藏时留一个可点击的占位，避免菜单栏按钮变空后找不回来。
+        if segments.isEmpty {
+            segments.append(ProviderBadge.Segment(label: "Agent", value: "--", stale: true))
         }
 
         let title = NSMutableAttributedString(attributedString: ProviderBadge.title(
@@ -730,6 +737,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         targetMenu.addItem(.separator())
         let countdownItem = action("菜单栏显示重置倒计时", selector: #selector(toggleCountdown))
         countdownItem.state = showCountdown ? .on : .off
+        let codexItem = action("菜单栏包含 Codex", selector: #selector(toggleCodexUsage))
+        codexItem.state = showCodexUsage ? .on : .off
         let claudeItem = action("菜单栏包含 Claude", selector: #selector(toggleClaudeUsage))
         claudeItem.state = showClaudeUsage ? .on : .off
         let baiItem = action("菜单栏包含 B.AI", selector: #selector(toggleBAIUsage))
@@ -943,6 +952,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             let failure = NSAlert(); failure.messageText = BAIError.keychain.localizedDescription; failure.runModal()
         }
+    }
+
+    @objc private func toggleCodexUsage() {
+        preferences.set(!showCodexUsage, forKey: "showCodexUsage")
+        updateDisplay(); rebuildMenu()
     }
 
     @objc private func toggleClaudeUsage() {
@@ -1160,6 +1174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "claudeText": claudeText,
             "claudeStale": claudeDataStale,
             "claudeRefreshing": claudeRefreshInProgress,
+            "codexMenuBarVisible": showCodexUsage,
             "claudeMenuBarVisible": showClaudeUsage,
             "baiSource": BAIEndpoint.balance,
             "baiCheckIntervalSeconds": Int(baiRefreshInterval),
@@ -1643,6 +1658,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ], countdown: "", alert: nil, fallbackIndicator: "", imminent: false, dark: false, readIndicator: "").string
         expect(badge.contains("Claude") && badge.contains("75%") && badge.contains("B.AI") && badge.contains("12.3K"), "Claude and B.AI render side by side")
         expect(!badge.contains("$"), "Credits are not rendered as currency")
+        expect(delegate.showCodexUsage, "Codex badge shown by default")
+        delegate.toggleCodexUsage()
+        expect(!delegate.showCodexUsage, "Codex toggle hides the badge")
+        delegate.toggleCodexUsage()
+        expect(delegate.showCodexUsage, "Codex toggle restores the badge")
         expect(delegate.showClaudeUsage && delegate.showBAIUsage, "Both badges shown by default")
         delegate.toggleBAIUsage()
         expect(!delegate.showBAIUsage && delegate.showClaudeUsage, "B.AI toggle leaves Claude alone")
